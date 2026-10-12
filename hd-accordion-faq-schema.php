@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       HD Accordion FAQ Schema
  * Description:       Adds an "FAQ" style to the core Accordion block. FAQ accordions are added to the page's schema as an FAQPage, through Yoast SEO, Rank Math, All in One SEO or The SEO Framework when one is active, or as standalone JSON-LD otherwise. Full blocks (paragraphs, lists, links) are allowed in answers.
- * Version:           1.2.0
+ * Version:           1.2.1
  * Requires at least: 6.9
  * Requires PHP:      7.4
  * Author:            Highrise Digital
