@@ -1,0 +1,39 @@
+# Builds the plugin zip and publishes a GitHub release when a version tag
+# (such as v1.2.0) is pushed. Sites running the plugin see the update in
+# their dashboard once the release is published.
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The tag must match the Version line in the plugin header, otherwise
+      # sites would keep being offered the same update.
+      - name: Check the tag matches the plugin version
+        run: |
+          version=$(grep -m1 -E '^\s*\*\s*Version:' hd-accordion-faq-schema.php | awk '{print $NF}')
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "Tag $GITHUB_REF_NAME doesn't match plugin version $version"
+            exit 1
+          fi
+
+      # git archive leaves out anything marked export-ignore in
+      # .gitattributes, and puts the files in a hd-accordion-faq-schema
+      # folder so WordPress installs it over the existing plugin.
+      - name: Build the plugin zip
+        run: git archive --format=zip --prefix=hd-accordion-faq-schema/ -o hd-accordion-faq-schema.zip HEAD
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" hd-accordion-faq-schema.zip --title "$GITHUB_REF_NAME" --generate-notes
