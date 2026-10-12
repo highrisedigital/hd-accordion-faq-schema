@@ -1,0 +1,4 @@
+# Left out of the plugin zip built for each release.
+/.github        export-ignore
+/.gitattributes export-ignore
+/README.md      export-ignore

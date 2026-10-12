@@ -2,13 +2,14 @@
 /**
  * Plugin Name:       HD Accordion FAQ Schema
  * Description:       Adds an "FAQ" style to the core Accordion block. FAQ accordions are added to the page's schema as an FAQPage, through Yoast SEO, Rank Math, All in One SEO or The SEO Framework when one is active, or as standalone JSON-LD otherwise. Full blocks (paragraphs, lists, links) are allowed in answers.
- * Version:           1.1.0
+ * Version:           1.2.0
  * Requires at least: 6.9
  * Requires PHP:      7.4
  * Author:            Highrise Digital
  * Author URI:        https://highrise.digital
  * License:           GPL-2.0-or-later
  * Text Domain:       hd-accordion-faq-schema
+ * Update URI:        https://github.com/highrisedigital/hd-accordion-faq-schema
  *
  * How it works
  * ------------
@@ -29,6 +30,12 @@
  *    no SEO plugin at all, the FAQPage is printed as its own JSON-LD script.
  *    The same happens if an SEO plugin is active but its schema output has
  *    been turned off, so the FAQ schema is never lost.
+ *
+ * Updates
+ * -------
+ * New versions are published as releases of the plugin's GitHub repository
+ * (see HD_FAQ_GITHUB_REPO below), and show in the WordPress dashboard like
+ * any other plugin update.
  *
  * @package HD_Accordion_FAQ_Schema
  */
@@ -503,4 +510,105 @@ function hd_faq_print_fallback_schema() {
 	if ( ! hd_faq_graph_ran() ) {
 		hd_faq_print_standalone_schema();
 	}
+}
+
+/**
+ * The GitHub repository this plugin is released from, as "owner/repo".
+ *
+ * Must match the "Update URI" line in the plugin header.
+ */
+const HD_FAQ_GITHUB_REPO = 'highrisedigital/hd-accordion-faq-schema';
+
+/**
+ * Tell WordPress about new versions published as GitHub releases.
+ *
+ * The "Update URI" line in the plugin header tells WordPress not to look for
+ * this plugin on WordPress.org. Instead, when WordPress checks for plugin
+ * updates, it runs the update_plugins_{hostname} filter for the header's
+ * hostname (github.com here) and uses whatever the filter returns.
+ *
+ * Each release needs a zip named hd-accordion-faq-schema.zip attached to it,
+ * holding the plugin in a hd-accordion-faq-schema folder. GitHub's own
+ * "Source code" zips can't be used: they unpack to a folder named after the
+ * repository and commit, which WordPress would install as a different plugin.
+ * The release workflow in .github/workflows builds the right zip on each tag.
+ *
+ * @param array|false $update      The update data so far (false by default).
+ * @param array       $plugin_data The plugin's header data.
+ * @param string      $plugin_file The plugin's path, relative to the plugins folder.
+ * @return array|false The update data, or $update if there's nothing to add.
+ */
+function hd_faq_check_for_update( $update, $plugin_data, $plugin_file ) {
+	// The filter runs for every plugin with a github.com Update URI.
+	if ( plugin_basename( __FILE__ ) !== $plugin_file ) {
+		return $update;
+	}
+
+	$release = hd_faq_get_latest_release();
+
+	if ( empty( $release ) ) {
+		return $update;
+	}
+
+	// WordPress compares this version with the installed one, and only
+	// offers the update when it's newer.
+	return [
+		'slug'    => dirname( $plugin_file ),
+		'version' => $release['version'],
+		'url'     => $release['url'],
+		'package' => $release['package'],
+	];
+}
+add_filter( 'update_plugins_github.com', 'hd_faq_check_for_update', 10, 3 );
+
+/**
+ * Get the latest GitHub release of the plugin.
+ *
+ * The answer is kept for six hours, so sites don't ask GitHub on every
+ * update check (GitHub limits how often a site can ask without signing in).
+ * Clicking "Check again" on the Dashboard > Updates screen skips the stored
+ * answer.
+ *
+ * @return array Version, release page URL and zip URL, or an empty array if
+ *               there's no usable release (or GitHub couldn't be reached).
+ */
+function hd_faq_get_latest_release() {
+	$cache_key = 'hd_faq_latest_release';
+	$release   = get_site_transient( $cache_key );
+
+	// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- Only read to skip the cache.
+	if ( false !== $release && ! isset( $_GET['force-check'] ) ) {
+		return $release;
+	}
+
+	$release  = [];
+	$response = wp_remote_get(
+		'https://api.github.com/repos/' . HD_FAQ_GITHUB_REPO . '/releases/latest',
+		[
+			'timeout' => 10,
+			'headers' => [ 'Accept' => 'application/vnd.github+json' ],
+		]
+	);
+
+	if ( 200 === wp_remote_retrieve_response_code( $response ) ) {
+		$body = json_decode( wp_remote_retrieve_body( $response ), true );
+
+		// Find the plugin zip among the files attached to the release.
+		foreach ( $body['assets'] ?? [] as $asset ) {
+			if ( 'hd-accordion-faq-schema.zip' === $asset['name'] ) {
+				$release = [
+					// Tags are written as "v1.2.0", versions as "1.2.0".
+					'version' => ltrim( $body['tag_name'], 'v' ),
+					'url'     => $body['html_url'],
+					'package' => $asset['browser_download_url'],
+				];
+				break;
+			}
+		}
+	}
+
+	// If GitHub couldn't be reached, try again in an hour rather than six.
+	set_site_transient( $cache_key, $release, empty( $release ) ? HOUR_IN_SECONDS : 6 * HOUR_IN_SECONDS );
+
+	return $release;
 }
