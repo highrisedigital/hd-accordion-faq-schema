@@ -1,11 +1,10 @@
 <?php
 /**
  * Plugin Name:       HD Accordion FAQ Schema
- * Description:       Adds an "FAQ" style to the core Accordion block. FAQ accordions are added to Yoast SEO's schema as an FAQPage, with full blocks (paragraphs, lists, links) allowed in answers.
- * Version:           1.0.0
+ * Description:       Adds an "FAQ" style to the core Accordion block. FAQ accordions are added to the page's schema as an FAQPage, through Yoast SEO, Rank Math, All in One SEO or The SEO Framework when one is active, or as standalone JSON-LD otherwise. Full blocks (paragraphs, lists, links) are allowed in answers.
+ * Version:           1.1.0
  * Requires at least: 6.9
  * Requires PHP:      7.4
- * Requires Plugins:  wordpress-seo
  * Author:            Highrise Digital
  * Author URI:        https://highrise.digital
  * License:           GPL-2.0-or-later
@@ -15,11 +14,21 @@
  * ------------
  * 1. The plugin registers an "FAQ" block style for the core Accordion block,
  *    so editors can mark any accordion as an FAQ from the Styles panel.
- * 2. When Yoast SEO builds its schema graph for a page, the plugin looks
- *    through the page's blocks for accordions with that style.
- * 3. Each accordion item becomes a schema "Question" with an "Answer", and
- *    the page's WebPage piece is also marked as an "FAQPage". This mirrors
- *    what Yoast's own FAQ block outputs, but answers can contain any blocks.
+ * 2. When a page is shown, the plugin looks through the page's blocks for
+ *    accordions with that style.
+ * 3. Each accordion item becomes a schema "Question" with an "Answer".
+ * 4. The plugin works out which SEO plugin is active and adds the questions
+ *    to that plugin's own schema graph, marking its WebPage piece as an
+ *    "FAQPage" too. This mirrors what Yoast's own FAQ block outputs, but
+ *    answers can contain any blocks. Supported graphs:
+ *    - Yoast SEO (wpseo_schema_graph)
+ *    - Rank Math (rank_math/json_ld)
+ *    - All in One SEO (aioseo_schema_output)
+ *    - The SEO Framework 5.0+ (the_seo_framework_schema_graph_data)
+ * 5. SEOPress has no single schema graph to join, so with SEOPress, or with
+ *    no SEO plugin at all, the FAQPage is printed as its own JSON-LD script.
+ *    The same happens if an SEO plugin is active but its schema output has
+ *    been turned off, so the FAQ schema is never lost.
  *
  * @package HD_Accordion_FAQ_Schema
  */
@@ -181,24 +190,26 @@ function hd_faq_get_faq_from_item( $item ) {
 }
 
 /**
- * Add FAQPage schema to Yoast's graph when the page has FAQ accordions.
+ * Get the FAQs on the page being shown, if there are any.
  *
- * Yoast outputs all of a page's schema as one JSON-LD "graph": a list of
- * connected pieces (WebPage, Organization, BreadcrumbList and so on) printed
- * in the page head. The wpseo_schema_graph filter lets us change that list
- * just before it's printed. This function:
- * 1. Adds "FAQPage" to the type of the WebPage piece.
- * 2. Adds one Question piece per FAQ, each with its accepted Answer.
- * 3. Links the questions to the page through the WebPage's mainEntity.
+ * Several SEO plugins may ask for the FAQs during one page load (and the
+ * fallback in the footer asks again), so the result is worked out once and
+ * kept for the rest of the request.
  *
- * @param array  $graph   Yoast's schema pieces.
- * @param object $context Yoast's Meta_Tags_Context for the current page.
- * @return array The graph, with the FAQ added.
+ * @return array[] List of [ 'question' => string, 'answer' => string ].
  */
-function hd_faq_add_schema( $graph, $context ) {
+function hd_faq_get_page_faqs() {
+	static $faqs = null;
+
+	if ( null !== $faqs ) {
+		return $faqs;
+	}
+
+	$faqs = [];
+
 	// FAQs only make sense on a single post or page, not archives or search.
 	if ( ! is_singular() ) {
-		return $graph;
+		return $faqs;
 	}
 
 	$content = get_post()->post_content;
@@ -206,41 +217,138 @@ function hd_faq_add_schema( $graph, $context ) {
 	// Quick text check first, so pages with no FAQ accordion (or synced
 	// pattern that might hold one) skip the block parsing entirely.
 	if ( ! str_contains( $content, 'is-style-faq' ) && ! str_contains( $content, '<!-- wp:block ' ) ) {
-		return $graph;
+		return $faqs;
 	}
 
 	$faqs = hd_faq_find_faqs( parse_blocks( $content ) );
 
-	// Nothing found (for example, a synced pattern without an FAQ in it).
-	if ( empty( $faqs ) ) {
-		return $graph;
+	return $faqs;
+}
+
+/**
+ * Work out which SEO plugin's schema graph the FAQ should be added to.
+ *
+ * Each SEO plugin is spotted by a constant or function it defines when it
+ * loads. If more than one is active (which is rare, and best avoided), the
+ * first in this list wins, so the FAQ is only ever added once.
+ *
+ * SEOPress isn't listed: it doesn't build a single schema graph that other
+ * plugins can join, so the standalone JSON-LD is used with it instead.
+ *
+ * @return string 'yoast', 'rank-math', 'aioseo', 'tsf' or 'standalone'.
+ */
+function hd_faq_get_integration() {
+	$integration = 'standalone';
+
+	if ( defined( 'WPSEO_VERSION' ) ) {
+		$integration = 'yoast';
+	} elseif ( defined( 'RANK_MATH_VERSION' ) ) {
+		$integration = 'rank-math';
+	} elseif ( function_exists( 'aioseo' ) ) {
+		$integration = 'aioseo';
+	} elseif ( defined( 'THE_SEO_FRAMEWORK_VERSION' ) && version_compare( THE_SEO_FRAMEWORK_VERSION, '5.0', '>=' ) ) {
+		// The schema graph filter arrived in The SEO Framework 5.0. Older
+		// versions fall through to the standalone JSON-LD.
+		$integration = 'tsf';
 	}
 
-	// Use Yoast's canonical URL, as Yoast's own FAQ block does, falling back
-	// to the permalink if it isn't set.
-	$url      = ! empty( $context->canonical ) ? $context->canonical : get_permalink();
-	$language = get_bloginfo( 'language' );
+	/**
+	 * Filter which integration is used, for example to force the standalone
+	 * JSON-LD.
+	 *
+	 * @param string $integration 'yoast', 'rank-math', 'aioseo', 'tsf' or 'standalone'.
+	 */
+	return apply_filters( 'hd_faq_schema_integration', $integration );
+}
 
-	// References to each question, added to the WebPage's mainEntity below.
-	$refs     = [];
+/**
+ * Hook into the schema graph of whichever SEO plugin is active.
+ *
+ * This runs on plugins_loaded, once every plugin has been loaded and has
+ * defined the constants hd_faq_get_integration() looks for.
+ */
+function hd_faq_setup_integration() {
+	switch ( hd_faq_get_integration() ) {
+		case 'yoast':
+			// 2 accepted arguments so the function receives Yoast's $context.
+			add_filter( 'wpseo_schema_graph', 'hd_faq_add_schema_yoast', 10, 2 );
+			break;
 
-	// Find the WebPage piece and remember where it is, for mainEntity below.
-	foreach ( $graph as $index => $piece ) {
-		$types = (array) ( $piece['@type'] ?? [] );
+		case 'rank-math':
+			// Late priority, so Rank Math's own WebPage piece is already there.
+			add_filter( 'rank_math/json_ld', 'hd_faq_add_schema_to_graph', 99 );
+			break;
 
-		if ( in_array( 'WebPage', $types, true ) ) {
-			// The page itself becomes an FAQPage too, as Yoast's FAQ block does.
-			$graph[ $index ]['@type'] = array_values( array_unique( array_merge( $types, [ 'FAQPage' ] ) ) );
-			$webpage_index            = $index;
-		}
+		case 'aioseo':
+			add_filter( 'aioseo_schema_output', 'hd_faq_add_schema_to_graph' );
+			break;
+
+		case 'tsf':
+			add_filter( 'the_seo_framework_schema_graph_data', 'hd_faq_add_schema_to_graph' );
+			break;
+
+		default:
+			// No graph to join, so print the FAQPage in the page head.
+			add_action( 'wp_head', 'hd_faq_print_standalone_schema', 20 );
+			return;
 	}
 
-	// Add a Question piece for each FAQ. Positions count from 1, and each
-	// question gets a unique @id so the WebPage can point to it.
+	/*
+	 * Safety net: if the SEO plugin never built its graph on this page (its
+	 * schema output can be turned off in its settings, for example), print
+	 * the FAQPage on its own in the footer instead.
+	 */
+	add_action( 'wp_footer', 'hd_faq_print_fallback_schema' );
+}
+add_action( 'plugins_loaded', 'hd_faq_setup_integration' );
+
+/**
+ * Remember, or check, whether an SEO plugin's schema graph has been built.
+ *
+ * @param bool $ran Pass true when a graph filter runs.
+ * @return bool Whether a graph filter has run on this page.
+ */
+function hd_faq_graph_ran( $ran = false ) {
+	static $has_run = false;
+
+	if ( $ran ) {
+		$has_run = true;
+	}
+
+	return $has_run;
+}
+
+/**
+ * Get the URL the FAQ's schema @ids are based on.
+ *
+ * @param string $url A canonical URL from the SEO plugin, if it has one.
+ * @return string The URL to use.
+ */
+function hd_faq_get_url( $url = '' ) {
+	if ( empty( $url ) ) {
+		$url = wp_get_canonical_url();
+	}
+
+	return $url ? $url : get_permalink();
+}
+
+/**
+ * Build a schema Question piece for each FAQ.
+ *
+ * Positions count from 1, and each question gets a unique @id so a WebPage
+ * piece can point to it.
+ *
+ * @param array[] $faqs FAQs from hd_faq_get_page_faqs().
+ * @param string  $url  The page URL, used for each question's @id.
+ * @return array[] The Question pieces.
+ */
+function hd_faq_get_question_pieces( $faqs, $url ) {
+	$language  = get_bloginfo( 'language' );
+	$questions = [];
+
 	foreach ( $faqs as $position => $faq ) {
-		$id      = $url . '#faq-' . ( $position + 1 );
-		$refs[]  = [ '@id' => $id ];
-		$graph[] = [
+		$id          = $url . '#faq-' . ( $position + 1 );
+		$questions[] = [
 			'@type'          => 'Question',
 			'@id'            => $id,
 			'position'       => $position + 1,
@@ -256,14 +364,143 @@ function hd_faq_add_schema( $graph, $context ) {
 		];
 	}
 
-	// Link the questions to the page. Merge with any existing mainEntity, in
-	// case Yoast's own FAQ block is also on the page.
-	if ( isset( $webpage_index ) ) {
-		$existing = $graph[ $webpage_index ]['mainEntity'] ?? [];
-		$graph[ $webpage_index ]['mainEntity'] = array_merge( $existing, $refs );
+	return $questions;
+}
+
+/**
+ * Add the page's FAQs to an SEO plugin's schema graph.
+ *
+ * SEO plugins output a page's schema as one JSON-LD "graph": a list of
+ * connected pieces (WebPage, Organization, BreadcrumbList and so on) printed
+ * in the page head, and each plugin has a filter to change that list just
+ * before it's printed. Yoast, All in One SEO and The SEO Framework pass a
+ * plain list; Rank Math passes the pieces keyed by name. Both work here.
+ * This function:
+ * 1. Adds "FAQPage" to the type of the WebPage piece.
+ * 2. Adds one Question piece per FAQ, each with its accepted Answer.
+ * 3. Links the questions to the page through the WebPage's mainEntity.
+ *
+ * If the graph has no WebPage piece, a separate FAQPage piece holding the
+ * questions is added instead.
+ *
+ * @param array  $graph The SEO plugin's schema pieces.
+ * @param string $url   A canonical URL from the SEO plugin, if it has one.
+ * @return array The graph, with the FAQ added.
+ */
+function hd_faq_add_schema_to_graph( $graph, $url = '' ) {
+	hd_faq_graph_ran( true );
+
+	$faqs = hd_faq_get_page_faqs();
+
+	// Nothing found, or the graph isn't one we can add to.
+	if ( empty( $faqs ) || ! is_array( $graph ) ) {
+		return $graph;
+	}
+
+	$url       = hd_faq_get_url( $url );
+	$questions = hd_faq_get_question_pieces( $faqs, $url );
+
+	// References to each question, added to the WebPage's mainEntity below.
+	$refs = [];
+	foreach ( $questions as $question ) {
+		$refs[] = [ '@id' => $question['@id'] ];
+	}
+
+	// Find the WebPage piece and remember where it is, for mainEntity below.
+	foreach ( $graph as $key => $piece ) {
+		$types = (array) ( is_array( $piece ) ? ( $piece['@type'] ?? [] ) : [] );
+
+		if ( in_array( 'WebPage', $types, true ) ) {
+			// The page itself becomes an FAQPage too, as Yoast's FAQ block does.
+			$graph[ $key ]['@type'] = array_values( array_unique( array_merge( $types, [ 'FAQPage' ] ) ) );
+			$webpage_key            = $key;
+			break;
+		}
+	}
+
+	foreach ( $questions as $question ) {
+		$graph[] = $question;
+	}
+
+	if ( isset( $webpage_key ) ) {
+		// Link the questions to the page. Merge with any existing mainEntity,
+		// in case the SEO plugin's own FAQ block is also on the page.
+		$existing = $graph[ $webpage_key ]['mainEntity'] ?? [];
+
+		// A single entity (rather than a list of them) is wrapped in a list.
+		if ( isset( $existing['@id'] ) || isset( $existing['@type'] ) ) {
+			$existing = [ $existing ];
+		}
+
+		$graph[ $webpage_key ]['mainEntity'] = array_merge( $existing, $refs );
+	} else {
+		// No WebPage piece to mark, so add an FAQPage piece of our own.
+		$graph[] = [
+			'@type'      => 'FAQPage',
+			'@id'        => $url . '#faq',
+			'url'        => $url,
+			'mainEntity' => $refs,
+		];
 	}
 
 	return $graph;
 }
-// Priority 10, and 2 accepted arguments so the function receives $context.
-add_filter( 'wpseo_schema_graph', 'hd_faq_add_schema', 10, 2 );
+
+/**
+ * Add the page's FAQs to Yoast SEO's schema graph.
+ *
+ * Yoast passes a context object along with the graph, which holds its
+ * canonical URL for the page. Using it matches Yoast's own FAQ block.
+ *
+ * @param array  $graph   Yoast's schema pieces.
+ * @param object $context Yoast's Meta_Tags_Context for the current page.
+ * @return array The graph, with the FAQ added.
+ */
+function hd_faq_add_schema_yoast( $graph, $context ) {
+	return hd_faq_add_schema_to_graph( $graph, $context->canonical ?? '' );
+}
+
+/**
+ * Print the page's FAQs as a standalone FAQPage JSON-LD script.
+ *
+ * Used when there's no SEO plugin schema graph to join. Questions are nested
+ * directly inside the FAQPage, which is the shape Google's FAQPage examples
+ * use.
+ */
+function hd_faq_print_standalone_schema() {
+	$faqs = hd_faq_get_page_faqs();
+
+	if ( empty( $faqs ) ) {
+		return;
+	}
+
+	$url    = hd_faq_get_url();
+	$schema = [
+		'@context'   => 'https://schema.org',
+		'@type'      => 'FAQPage',
+		'@id'        => $url . '#faq',
+		'url'        => $url,
+		'inLanguage' => get_bloginfo( 'language' ),
+		'mainEntity' => hd_faq_get_question_pieces( $faqs, $url ),
+	];
+
+	/*
+	 * JSON_HEX_TAG writes < and > as < and >, so HTML in the
+	 * answers can't close the script tag early. The JSON still reads the
+	 * same.
+	 */
+	printf(
+		"<script type=\"application/ld+json\" class=\"hd-faq-schema\">%s</script>\n",
+		wp_json_encode( $schema, JSON_HEX_TAG | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE )
+	);
+}
+
+/**
+ * Print the standalone FAQ schema in the footer if the SEO plugin's graph
+ * was never built on this page.
+ */
+function hd_faq_print_fallback_schema() {
+	if ( ! hd_faq_graph_ran() ) {
+		hd_faq_print_standalone_schema();
+	}
+}
